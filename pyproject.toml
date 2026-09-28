@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "prism-reviewer"
+version = "1.0.0"
+description = "Agentic multi-agent code review (LangGraph + LiteLLM) — Warden, Architect and Inspector agents behind a hallucination-guarding Verifier, shippable as a GitHub Action"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "Huzaifa Aqeel" },
+]
+keywords = ["code-review", "agents", "langgraph", "litellm", "github-actions"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+dependencies = [
+    "litellm>=1.40.0",
+    "langgraph>=0.2.0",
+    "PyGithub>=2.0.0",
+    "requests>=2.25.0",
+    "tree-sitter>=0.20.0",
+    "tree-sitter-python",
+    "tree-sitter-java",
+    "tree-sitter-typescript",
+    "tree-sitter-javascript",
+    "tree-sitter-cpp",
+    "tree-sitter-c",
+    "tree-sitter-go",
+    "tree-sitter-rust",
+    "tree-sitter-yaml",
+    "tree-sitter-html",
+    "tree-sitter-json",
+    "tree-sitter-bash",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[project.scripts]
+prism-review = "prism_reviewer.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/HuzaifaAqeel/Prism-Reviewer"
+Repository = "https://github.com/HuzaifaAqeel/Prism-Reviewer"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/prism_reviewer"]

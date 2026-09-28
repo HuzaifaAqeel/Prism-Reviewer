@@ -1,0 +1,16 @@
+# Copy to prism_reviewer.toml and fill in. All secrets resolve from env vars.
+[llm]
+model = "${LLM_MODEL|-openai/gpt-4o}"
+
+[github]
+token = "${GITHUB_TOKEN|-}"
+
+# Optional per-agent overrides, e.g.:
+# [agents.models]
+# warden = "anthropic/claude-3-5-sonnet-20241022"
+# inspector = "openai/gpt-4o-mini"
+
+[agents.reasoning_effort]
+warden = "medium"
+architect = "medium"
+inspector = "medium"

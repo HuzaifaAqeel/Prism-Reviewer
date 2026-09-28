@@ -1,0 +1,143 @@
+"""
+prism_reviewer.agents.verifier
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Verifier node for the PrismReviewer LangGraph pipeline.
+
+Responsibilities
+----------------
+1. **Hallucination guard**: drops any finding whose ``(file, line)`` pair does
+   not exist in the raw diff.  This prevents the agents from commenting on
+   lines they invented.
+2. **Idempotent deduplication**: drops any finding whose ``signature`` matches
+   a signature from the previous run, preventing the same issue from being
+   reported repeatedly on unchanged code.
+
+The node is intentionally simple — it performs only mechanical filtering, no
+inference.  Accordingly, it uses ``reasoning_effort=low`` when an LLM call is
+ever needed (currently it performs no LLM calls at all).
+"""
+
+from typing import Any, Dict, List
+
+from ..core.logger import get_logger
+from ..utils.git_utils import is_test_file, normalize_file_path, parse_diff_changed_lines
+from .nodes import NodeLogger
+from .state import Finding, ReviewState
+
+logger = get_logger("prism_reviewer.agents.verifier")
+
+
+def verifier_node(state: ReviewState) -> Dict[str, Any]:
+    """
+    Verifier node — hallucination guard and idempotent deduplication.
+
+    Takes ``raw_findings`` (the merged output of all three parallel agents)
+    and filters it down to ``verified_findings`` by:
+
+    1. Dropping findings whose ``(file, line)`` pair is not in the diff.
+    2. Dropping findings whose ``signature`` matches a previous-run signature.
+    3. Normalizing severities on test files to ``ADVISORY``.
+
+    Args:
+        state: The current ``ReviewState`` dict.  Key fields consumed:
+               - ``raw_findings``       — merged output of all three agents.
+               - ``git_diff``           — raw unified diff for line validation.
+               - ``previous_signatures``— list of signatures from the last run.
+
+    Returns:
+        Partial state update: ``{"verified_findings": [...]}``.
+    """
+    # Flush accumulated parallel node logs in strict rank and region order
+    agent_rank = {"warden": 1, "architect": 2, "inspector": 3}
+    raw_blocks: List[Dict[str, Any]] = state.get("node_log_blocks", [])
+    sorted_blocks = sorted(
+        raw_blocks,
+        key=lambda b: (
+            agent_rank.get(b.get("agent", ""), 4),
+            b.get("region_index", 1),
+        ),
+    )
+    for b in sorted_blocks:
+        block_text = b.get("block", "")
+        if block_text:
+            logger.info(block_text)
+
+    node_log = NodeLogger(logger, "VERIFIER Node")
+
+    raw_findings: List[Finding] = state.get("raw_findings", [])
+
+    # Count per-agent for the log
+    agent_counts: Dict[str, int] = {"warden": 0, "architect": 0, "inspector": 0}
+    for f in raw_findings:
+        agent = f.get("agent", "unknown")
+        agent_counts[agent] = agent_counts.get(agent, 0) + 1
+
+    node_log.record(
+        f"📥 Raw findings received: {len(raw_findings)} "
+        f"(warden={agent_counts.get('warden', 0)}, "
+        f"architect={agent_counts.get('architect', 0)}, "
+        f"inspector={agent_counts.get('inspector', 0)})"
+    )
+
+    # Build the set of valid (file, line) pairs from the diff
+    valid_lines = parse_diff_changed_lines(state.get("git_diff", ""))
+
+    # Convert previous_signatures list to a set for O(1) lookup
+    previous_sigs: set[str] = set(state.get("previous_signatures", []))
+    seen_current_signatures: set[str] = set()
+    seen_location_keys: set[tuple[str, int, str, str]] = set()
+
+    verified: List[Finding] = []
+    dropped_hallucination = 0
+    dropped_duplicate = 0
+    dropped_intra_duplicate = 0
+    test_file_coerced = 0
+
+    for finding in raw_findings:
+        file_path: str = normalize_file_path(finding.get("file", ""))
+        line_num: int = finding.get("line", 0)
+        agent: str = str(finding.get("agent", "unknown"))
+        signature: str = finding.get("signature", "")
+        message: str = str(finding.get("message", "")).strip().lower()
+
+        # Guard 1: line must exist in the diff
+        if (file_path, line_num) not in valid_lines:
+            dropped_hallucination += 1
+            continue
+
+        # Update normalized path in finding object
+        finding["file"] = file_path
+
+        # Guard 2: signature must not match a previous run
+        if signature and signature in previous_sigs:
+            dropped_duplicate += 1
+            continue
+
+        # Guard 3: intra-run deduplication (duplicate signature or file+line+agent+message)
+        loc_key = (file_path, line_num, agent, message)
+        if (signature and signature in seen_current_signatures) or loc_key in seen_location_keys:
+            dropped_intra_duplicate += 1
+            continue
+
+        # Rule: comments/findings on test files must always be ADVISORY
+        if is_test_file(file_path):
+            if finding.get("severity") != "ADVISORY":
+                test_file_coerced += 1
+                finding["severity"] = "ADVISORY"
+
+        if signature:
+            seen_current_signatures.add(signature)
+        seen_location_keys.add(loc_key)
+
+        verified.append(finding)
+
+    node_log.record(f"🧹 Dropped {dropped_hallucination}: line numbers not present in diff (hallucinations)")
+    node_log.record(f"🔁 Dropped {dropped_duplicate}: duplicate signature match (idempotent)")
+    node_log.record(f"👥 Dropped {dropped_intra_duplicate}: duplicate findings within current run")
+    if test_file_coerced > 0:
+        node_log.record(f"💡 Coerced {test_file_coerced} finding(s) on test files to ADVISORY severity")
+    node_log.record(f"✅ Verified findings: {len(verified)}")
+    node_log.flush()
+
+    return {"verified_findings": verified}
+
